@@ -15,15 +15,12 @@ import (
 
 	"github.com/fatih/color"
 )
-	
-var skipEx string = "*.jpg,*.jpeg,*.png,*.gif,*.bmp,*.tiff,*.webp,*.svg,*.ico,*.psd,*.ai,*.mp3,*.wav,*.flac,*.aac,*.ogg,*.m4a,*.mp4,*.avi,*.mkv,*.mov,*.webm,*.pdf,*.doc,*.docx,*.xls,*.xlsx,*.zip,*.rar,*.7z,*.tar,*.gz,*.exe,*.dll,*.so,*.dylib,*.bin,*.db,*.sqlite,*.tmp,*.woff,*.woff2,*.ttf"
 
 var (
 	quietMode     = flag.Bool("q", false, "Тихий режим (только итог)")
 	skipEmpty     = flag.Bool("ss", false, "Пропускать пустые строки")
 	recursive     = flag.Bool("r", false, "Рекурсивный поиск")
 	excludeDirs   = flag.String("ex", "vendor", "Директории для исключения (через запятую)")
-	skipLines     = flag.String("sl", skipEx, "Шаблоны файлов для пропуска подсчета строк (через запятую)")
 	githubURL     = flag.String("url", "", "GitHub URL репозитория")
 )
 
@@ -80,48 +77,9 @@ func countLinesFromContent(content string) int {
 
 func isExcluded(path string) bool {
 	excluded := strings.Split(*excludeDirs, ",")
-	for _, pattern := range excluded {
-		pattern = strings.TrimSpace(pattern)
-		
-		// Если шаблон содержит *, используем filepath.Match
-		if strings.Contains(pattern, "*") {
-			// Проверяем совпадение с именем файла
-			if matched, _ := filepath.Match(pattern, filepath.Base(path)); matched {
-				return true
-			}
-			// Проверяем совпадение с полным путем
-			if matched, _ := filepath.Match(pattern, path); matched {
-				return true
-			}
-		} else {
-			// Старая логика для директорий
-			if strings.Contains(path, pattern) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// Функция для проверки пропуска подсчета строк
-func shouldSkipLines(path string) bool {
-	if *skipLines == "" {
-		return false
-	}
-	
-	patterns := strings.Split(*skipLines, ",")
-	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
-		
-		// Проверяем совпадение с именем файла
-		if matched, _ := filepath.Match(pattern, filepath.Base(path)); matched {
-			return true
-		}
-		// Проверяем совпадение с полным путем
-		if matched, _ := filepath.Match(pattern, path); matched {
+	for _, dir := range excluded {
+		dir = strings.TrimSpace(dir)
+		if strings.Contains(path, dir) {
 			return true
 		}
 	}
@@ -212,9 +170,6 @@ func processGitHubRepo(url, pattern string) {
 	if !*quietMode {
 		color.Cyan("Анализ GitHub репозитория: %s/%s", username, repo)
 		color.Cyan("Шаблон поиска: %s", pattern)
-		if *skipLines != "" {
-			color.Cyan("Пропуск строк для: %s", *skipLines)
-		}
 		fmt.Println(strings.Repeat("-", 50))
 	}
 
@@ -226,41 +181,32 @@ func processGitHubRepo(url, pattern string) {
 
 	total := 0
 	blue := color.New(color.FgBlue).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
 	matchedFiles := 0
 
 	for _, file := range files {
-		// Проверяем исключения с поддержкой шаблонов
+		// Проверяем исключения
 		if isExcluded(file.Path) {
 			continue
 		}
 
-		// Проверяем основной шаблон поиска
+		// Проверяем шаблон
 		matched, _ := filepath.Match(pattern, filepath.Base(file.Path))
 		if matched {
-			lines := 0
-			
-			// Проверяем, нужно ли пропускать подсчет строк для этого файла
-			if shouldSkipLines(file.Path) {
+			content, err := getFileContent(username, repo, branch, file.Path)
+			if err != nil {
 				if !*quietMode {
-					fmt.Printf("%s %s\n", blue(file.Path), yellow("s"))
+					color.Yellow("%s: ошибка загрузки - %v", file.Path, err)
 				}
-			} else {
-				content, err := getFileContent(username, repo, branch, file.Path)
-				if err != nil {
-					if !*quietMode {
-						color.Yellow("%s: ошибка загрузки - %v", file.Path, err)
-					}
-					continue
-				}
-
-				lines = countLinesFromContent(content)
-				if !*quietMode {
-					fmt.Printf("%s: %d\n", blue(file.Path), lines)
-				}
-				total += lines
+				continue
 			}
-			
+
+			lines := countLinesFromContent(content)
+			file.Lines = lines
+
+			if !*quietMode {
+				fmt.Printf("%s: %d\n", blue(file.Path), lines)
+			}
+			total += lines
 			matchedFiles++
 		}
 	}
@@ -339,31 +285,20 @@ func main() {
 
 	total := 0
 	blue := color.New(color.FgBlue).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
 	red := color.New(color.FgRed).SprintFunc()
 
 	for _, file := range files {
-		var lines int
-		var err error
-		
-		// Проверяем, нужно ли пропускать подсчет строк
-		if shouldSkipLines(file) {
+		lines, err := countLines(file)
+		if err != nil {
 			if !*quietMode {
-				fmt.Printf("%s: %s\n", blue(file), yellow("пропущено"))
+				fmt.Printf("%s: %s\n", blue(file), red("ошибка"))
 			}
-		} else {
-			lines, err = countLines(file)
-			if err != nil {
-				if !*quietMode {
-					fmt.Printf("%s: %s\n", blue(file), red("ошибка"))
-				}
-				continue
-			}
-			if !*quietMode {
-				fmt.Printf("%s: %d\n", blue(file), lines)
-			}
-			total += lines
+			continue
 		}
+		if !*quietMode {
+			fmt.Printf("%s: %d\n", blue(file), lines)
+		}
+		total += lines
 	}
 
 	if *quietMode {
